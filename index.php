@@ -1,5 +1,12 @@
 <?php
 require_once 'includes/db.php';
+session_start();
+
+// Verifica se o usuário está logado
+if (!isset($_SESSION['usuario_id'])) {
+    header('Location: login.php');
+    exit();
+}
 
 // Inicializar variáveis
 $mensagem = '';
@@ -19,8 +26,12 @@ if (isset($_POST['action']) && $_POST['action'] === 'delete') {
             throw new Exception("ID inválido");
         }
 
-        $stmt = $pdo->prepare("DELETE FROM transacoes WHERE id = ?");
-        $stmt->execute([$id]);
+        $stmt = $pdo->prepare("DELETE FROM transacoes WHERE id = ? AND usuario_id = ?");
+        $stmt->execute([$id, $_SESSION['usuario_id']]);
+        
+        if ($stmt->rowCount() === 0) {
+            throw new Exception("Transação não encontrada ou não pertence ao usuário");
+        }
         
         $mensagem = "Transação excluída com sucesso!";
         $tipo_mensagem = "sucesso";
@@ -51,8 +62,12 @@ else if (isset($_POST['action']) && $_POST['action'] === 'update') {
             throw new Exception("Tipo de transação inválido");
         }
 
-        $stmt = $pdo->prepare("UPDATE transacoes SET descricao = ?, valor = ?, tipo = ?, data = ? WHERE id = ?");
-        $stmt->execute([$descricao, $valor, $tipo, $data, $id]);
+        $stmt = $pdo->prepare("UPDATE transacoes SET descricao = ?, valor = ?, tipo = ?, data = ? WHERE id = ? AND usuario_id = ?");
+        $stmt->execute([$descricao, $valor, $tipo, $data, $id, $_SESSION['usuario_id']]);
+        
+        if ($stmt->rowCount() === 0) {
+            throw new Exception("Transação não encontrada ou não pertence ao usuário");
+        }
         
         $mensagem = "Transação atualizada com sucesso!";
         $tipo_mensagem = "sucesso";
@@ -88,8 +103,8 @@ else if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             throw new Exception("Data inválida.");
         }
 
-        $stmt = $pdo->prepare("INSERT INTO transacoes (descricao, valor, tipo, data) VALUES (?, ?, ?, ?)");
-        $stmt->execute([$descricao, $valor, $tipo, $data]);
+        $stmt = $pdo->prepare("INSERT INTO transacoes (usuario_id, descricao, valor, tipo, data) VALUES (?, ?, ?, ?, ?)");
+        $stmt->execute([$_SESSION['usuario_id'], $descricao, $valor, $tipo, $data]);
         
         $mensagem = "Transação registrada com sucesso!";
         $tipo_mensagem = "sucesso";
@@ -103,20 +118,24 @@ else if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Calcular saldo
+// Calcular saldo e totais
 try {
-    $stmt = $pdo->query("SELECT 
-        SUM(CASE WHEN tipo = 'entrada' THEN valor ELSE -valor END) AS saldo,
-        SUM(CASE WHEN tipo = 'entrada' THEN valor ELSE 0 END) AS total_entradas,
-        SUM(CASE WHEN tipo = 'saida' THEN valor ELSE 0 END) AS total_saidas
-        FROM transacoes");
+    $stmt = $pdo->prepare("
+        SELECT 
+            SUM(CASE WHEN tipo = 'entrada' THEN valor ELSE -valor END) as saldo,
+            SUM(CASE WHEN tipo = 'entrada' THEN valor ELSE 0 END) as total_entradas,
+            SUM(CASE WHEN tipo = 'saida' THEN valor ELSE 0 END) as total_saidas
+        FROM transacoes
+        WHERE usuario_id = ?
+    ");
+    $stmt->execute([$_SESSION['usuario_id']]);
     $resultado = $stmt->fetch(PDO::FETCH_ASSOC);
+    
     $saldo = $resultado['saldo'] ?? 0;
     $total_entradas = $resultado['total_entradas'] ?? 0;
     $total_saidas = $resultado['total_saidas'] ?? 0;
 } catch (PDOException $e) {
-    $mensagem = "Erro ao calcular saldo: " . $e->getMessage();
-    $tipo_mensagem = "erro";
+    die("Erro ao calcular saldo: " . $e->getMessage());
 }
 
 // Configuração da paginação
@@ -125,8 +144,8 @@ $pagina_atual = isset($_GET['pagina']) ? (int)$_GET['pagina'] : 1;
 $offset = ($pagina_atual - 1) * $itens_por_pagina;
 
 // Atualizar a query de contagem total com os filtros
-$sql_count = "SELECT COUNT(*) FROM transacoes WHERE 1=1";
-$sql_params = [];
+$sql_count = "SELECT COUNT(*) FROM transacoes WHERE usuario_id = ? AND 1=1";
+$sql_params = [$_SESSION['usuario_id']];
 
 if (!empty($busca)) {
     $sql_count .= " AND descricao LIKE ?";
@@ -175,12 +194,19 @@ $base_url = '?' . ($query_string ? $query_string . '&' : '');
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sistema de Fluxo de Caixa</title>
+    <link rel="icon" type="image/png" href="img/favicon.png">
+    <link rel="shortcut icon" href="img/favicon.ico">
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
     <div class="container">
         <header>
             <h1>Sistema de Fluxo de Caixa</h1>
+            <div class="user-info">
+                <span class="user-name">Olá, <?= htmlspecialchars($_SESSION['usuario_nome']) ?></span>
+                <a href="perfil.php" class="btn-perfil">Meu Perfil</a>
+                <a href="logout.php" class="btn-logout">Sair</a>
+            </div>
         </header>
 
         <?php if ($mensagem): ?>
@@ -286,7 +312,7 @@ $base_url = '?' . ($query_string ? $query_string . '&' : '');
                 <tbody>
                     <?php
                     // Atualizar a query principal com os filtros
-                    $sql = "SELECT * FROM transacoes WHERE 1=1";
+                    $sql = "SELECT * FROM transacoes WHERE usuario_id = ? AND 1=1";
 
                     if (!empty($busca)) {
                         $sql .= " AND descricao LIKE ?";
@@ -310,6 +336,7 @@ $base_url = '?' . ($query_string ? $query_string . '&' : '');
                         $stmt = $pdo->prepare($sql);
                         $param_index = 1;
                         
+                        $stmt->bindValue($param_index++, $_SESSION['usuario_id'], PDO::PARAM_INT);
                         if (!empty($busca)) {
                             $stmt->bindValue($param_index++, "%{$busca}%", PDO::PARAM_STR);
                         }
